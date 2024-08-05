@@ -1,0 +1,1 @@
+*/5 * * * * python3 /main.py >> /var/log/cron.log 2>&1

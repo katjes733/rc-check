@@ -1,0 +1,4 @@
+[MASTER]
+disable=
+    E0401, # import-error
+    W0603, # global-statement
