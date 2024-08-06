@@ -21,6 +21,7 @@ from playhouse.postgres_ext import BinaryJSONField, DateTimeTZField, PostgresqlE
 
 
 CONST_ENCODING = 'utf-8'
+CONST_INCOMPLETE = "Incomplete"
 
 load_dotenv()
 
@@ -127,10 +128,10 @@ def get_config_data(config: str):
         "Vehicle": configs[0],
         "Motor/Battery": configs[1],
         "Price": configs[2],
-        "Wheels": configs[wheels_index] if wheels_index > 0 else "Incomplete",
-        "Interior": configs[wheels_index + 1] if wheels_index > 0 else "Incomplete",
-        "Exterior": configs[wheels_index + 2] if wheels_index > 0 else "Incomplete",
-        "Packages": ", ".join(configs[(wheels_index + 3):] if wheels_index > 0 else ["Incomplete"])
+        "Wheels": configs[wheels_index] if wheels_index > 0 else CONST_INCOMPLETE,
+        "Interior": configs[wheels_index + 1] if wheels_index > 0 else CONST_INCOMPLETE,
+        "Exterior": configs[wheels_index + 2] if wheels_index > 0 else CONST_INCOMPLETE,
+        "Packages": ", ".join(configs[(wheels_index + 3):] if wheels_index > 0 else [CONST_INCOMPLETE])
     }
 
 
@@ -319,6 +320,39 @@ def get_env_var_values(env_var_name: str, event):
     return env_var_values
 
 
+def is_match_configurations(new: dict, current: dict) -> bool:
+    """
+    Compares the new configuration (from URL search) with the current
+    configuration in the DB.
+    If new or current configurations contains any `Incomplete` text, the
+    comparison will only take into consideration fields `Vehicle`,
+    `Motor/Battery` and `Price` as the unique parameters. These are the only
+    values that are guaranteed to be extracted every time a configuration is
+    detected on the website.
+    In all other cases we do a full dict compare.
+
+    Args:
+        new (dict): The new configuration
+        current (dict): The current configuration in the DB
+
+    Returns:
+        bool: True, if the configurations match; False otherwise
+    """
+    if len(new) != len(current):
+        return False
+
+    if f'"{CONST_INCOMPLETE}"' in json.dumps(new) or \
+            f'"{CONST_INCOMPLETE}"' in json.dumps(current):
+        for index, one_new in enumerate(new):
+            if one_new["Vehicle"] != current[index]["Vehicle"] or \
+                    one_new["Motor/Battery"] != current[index]["Motor/Battery"] or \
+                    one_new["Price"] != current[index]["Price"]:
+                return False
+        return True
+
+    return new == current
+
+
 def task(number: int):
     """
     Performs the actual work
@@ -413,7 +447,10 @@ def task(number: int):
                 number_of_configurations
             )
             current_time = datetime.now()
-            if configurations == existing_record.configurations:
+            if is_match_configurations(
+                        new=configurations,
+                        current=existing_record.configurations
+                    ):
                 logger.info('No changes; updating last checked time only.')
 
                 existing_record.last_checked_time = current_time

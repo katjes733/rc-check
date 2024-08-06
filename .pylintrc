@@ -2,3 +2,6 @@
 disable=
     E0401, # import-error
     W0603, # global-statement
+
+[FORMAT]
+max-line-length=120
