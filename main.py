@@ -127,10 +127,10 @@ def get_config_data(config: str):
         "Vehicle": configs[0],
         "Motor/Battery": configs[1],
         "Price": configs[2],
-        "Wheels": configs[wheels_index],
-        "Interior": configs[wheels_index + 1],
-        "Exterior": configs[wheels_index + 2],
-        "Packages": ", ".join(configs[(wheels_index + 3):])
+        "Wheels": configs[wheels_index] if wheels_index > 0 else "Incomplete",
+        "Interior": configs[wheels_index + 1] if wheels_index > 0 else "Incomplete",
+        "Exterior": configs[wheels_index + 2] if wheels_index > 0 else "Incomplete",
+        "Packages": ", ".join(configs[(wheels_index + 3):] if wheels_index > 0 else ["Incomplete"])
     }
 
 
