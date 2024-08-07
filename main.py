@@ -21,6 +21,11 @@ from playhouse.postgres_ext import BinaryJSONField, DateTimeTZField, PostgresqlE
 
 
 CONST_ENCODING = 'utf-8'
+CONST_INCOMPLETE = "Incomplete"
+CONST_RED = "#FF0000"
+CONST_GREEN = "#00FF00"
+CONST_ORANGE = "#FF8C00"
+CONST_GRAY = "#808080"
 
 load_dotenv()
 
@@ -117,8 +122,7 @@ def get_config_data(config: str):
         config = config[position:]
         match = re.search(pattern, config)
 
-    if not config.endswith("More"):
-        configs.append(config)
+    configs.append(re.sub(r"(\d\+)More", r"\g<1> additional Packages", config))
 
     if len(configs) == 0:
         return None
@@ -127,10 +131,10 @@ def get_config_data(config: str):
         "Vehicle": configs[0],
         "Motor/Battery": configs[1],
         "Price": configs[2],
-        "Wheels": configs[wheels_index],
-        "Interior": configs[wheels_index + 1],
-        "Exterior": configs[wheels_index + 2],
-        "Packages": ", ".join(configs[(wheels_index + 3):])
+        "Wheels": configs[wheels_index] if wheels_index > 0 else CONST_INCOMPLETE,
+        "Interior": configs[wheels_index + 1] if wheels_index > 0 else CONST_INCOMPLETE,
+        "Exterior": configs[wheels_index + 2] if wheels_index > 0 else CONST_INCOMPLETE,
+        "Packages": ", ".join(configs[(wheels_index + 3):] if wheels_index > 0 else [CONST_INCOMPLETE])
     }
 
 
@@ -219,28 +223,41 @@ def prepare_and_post_message_to_slack(
     if not url:
         return
 
+    color = CONST_GRAY
+    header_text = "Updates to Rivian Configurations"
+    if status_code == 200:
+        color = CONST_ORANGE
+    elif status_code == 201:
+        color = CONST_GREEN
+        header_text = "New Rivian Configurations"
+    elif status_code == 500:
+        color = CONST_RED
+        header_text = "Error retrieving Rivian configurations"
+
     message = {
-        "color": "00ff00" if status_code == 200 else "ff0000",
-        "text": message_text,
-        "blocks": [
-            {
-                "type": "header",
-                "text": {
-                    "type": "plain_text",
-                    "text": "Rivian Configurations Update" if status_code == 200 else "Rivian Configurations Error"
+        "attachments": [{
+            "fallback": re.sub(r"\<.*?\|(?P<desc>.*?)\>", r"\g<desc>", message_text),
+            "color": color,
+            "blocks": [
+                {
+                    "type": "header",
+                    "text": {
+                        "type": "plain_text",
+                        "text": header_text
+                    }
+                },
+                {
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": f"*{message_text}*"
+                    }
                 }
-            },
-            {
-                "type": "section",
-                "text": {
-                    "type": "mrkdwn",
-                    "text": f"*{message_text}*"
-                }
-            }
-        ]
+            ]
+        }]
     }
     for config in configurations:
-        message["blocks"].extend(get_config_message(config))
+        message["attachments"][0]["blocks"].extend(get_config_message(config))
 
     post_message(url, message)
 
@@ -319,6 +336,54 @@ def get_env_var_values(env_var_name: str, event):
     return env_var_values
 
 
+def is_match_configurations(new: dict, current: dict) -> bool:
+    """
+    Compares the new configuration (from URL search) with the current
+    configuration in the DB.
+    If new or current configurations contains any `Incomplete` text, the
+    comparison will only take into consideration fields `Vehicle`,
+    `Motor/Battery` and `Price` as the unique parameters. These are the only
+    values that are guaranteed to be extracted every time a configuration is
+    detected on the website.
+    In all other cases we do a full dict compare.
+
+    Args:
+        new (dict): The new configuration
+        current (dict): The current configuration in the DB
+
+    Returns:
+        bool: True, if the configurations match; False otherwise
+    """
+    if len(new) != len(current):
+        return False
+
+    if has_incomplete_configuration(new) and \
+            not has_incomplete_configuration(current):
+        # min compare
+        for index, one_new in enumerate(new):
+            if one_new["Vehicle"] != current[index]["Vehicle"] or \
+                    one_new["Motor/Battery"] != current[index]["Motor/Battery"] or \
+                    one_new["Price"] != current[index]["Price"]:
+                return False
+        return True
+
+    # full compare
+    return new == current
+
+
+def has_incomplete_configuration(configurations: dict) -> bool:
+    """
+    Identifies if a set of configurations contain incomplete data.
+
+    Args:
+        configurations (dict): The dict of configurations.
+
+    Returns:
+        bool: True, if there is an incomplete configuration; false otherwise.
+    """
+    return f'"{CONST_INCOMPLETE}"' in json.dumps(configurations)
+
+
 def task(number: int):
     """
     Performs the actual work
@@ -328,7 +393,7 @@ def task(number: int):
     """
     url = urls_to_check[number]
     url_description = url_descriptions[number] if number < len(url_descriptions) else "No description"
-    articles = None
+    configurations = None
     with sync_playwright() as p:
         logger.info('Launching browser...')
         browser = p.webkit.launch()
@@ -341,29 +406,28 @@ def task(number: int):
         logger.info('Successfully retrieved URL.')
 
         reload_counter = 0
-        while articles is None and reload_counter < 3:
+        while configurations is None and reload_counter < 3:
             span_element = page.locator('text="No exact matches"')
             if span_element.count() > 0:
-                articles = []
+                configurations = []
 
             article_elements = page.locator("[data-testid^='ShopVehicleLink-']")
             config_count = len(article_elements.all())
             if config_count > 0:
-                articles = []
+                configurations = []
                 for element in article_elements.all():
-                    logger.debug(element.text_content())
-                    articles.append(element.text_content())
+                    configurations.append(get_config_data(element.text_content()))
 
-            if articles is None:
+            if configurations is None or has_incomplete_configuration(configurations):
                 reload_counter = reload_counter + 1
                 page.reload()
                 page.wait_for_load_state('load')
 
         browser.close()
 
-    if articles is None:
+    if configurations is None:
         status_code = 500
-        message = "URL could not be rendered correctly after multiple reloads."
+        message = f"<{url}|URL> could not be rendered correctly after multiple reloads."
         logger.error(message)
         prepare_and_post_message_to_slack(
             status_code=status_code,
@@ -373,17 +437,13 @@ def task(number: int):
         )
     else:
         status_code = 200
-        configs_count = len(articles)
+        configs_count = len(configurations)
         if configs_count == 0:
-            message = f"No matching configuration was found for {url_description}"
+            message = f"No matching configuration was found for <{url}|{url_description}>"
             logger.info(message)
         else:
-            message = f"{configs_count} matching configuration{' was' if configs_count == 1 else 's were'} found for {url_description}"
+            message = f"{configs_count} matching configuration{' was' if configs_count == 1 else 's were'} found for <{url}|{url_description}>"
             logger.info(message)
-
-        configurations = []
-        for article in articles:
-            configurations.append(get_config_data(article))
 
         record = RcCheckModel.select().where(RcCheckModel.url == url)
         if not record.exists():
@@ -398,7 +458,8 @@ def task(number: int):
                 configurations=configurations,
             )
             new_record.save()
-            if len(articles) > 0 or noisy_messages:
+            status_code = 201
+            if len(configurations) > 0 or noisy_messages:
                 prepare_and_post_message_to_slack(
                     status_code=status_code,
                     message_text=message,
@@ -413,7 +474,10 @@ def task(number: int):
                 number_of_configurations
             )
             current_time = datetime.now()
-            if configurations == existing_record.configurations:
+            if is_match_configurations(
+                        new=configurations,
+                        current=existing_record.configurations
+                    ):
                 logger.info('No changes; updating last checked time only.')
 
                 existing_record.last_checked_time = current_time
