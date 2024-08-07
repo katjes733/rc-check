@@ -225,12 +225,15 @@ def prepare_and_post_message_to_slack(
         return
 
     color = CONST_GRAY
+    header_text = "Updates to Rivian Configurations"
     if status_code == 200:
         color = CONST_ORANGE
     elif status_code == 201:
         color = CONST_GREEN
+        header_text = "New Rivian Configurations"
     elif status_code == 500:
         color = CONST_RED
+        header_text = "Error retrieving Rivian configurations"
 
     message = {
         "attachments": [{
@@ -241,7 +244,7 @@ def prepare_and_post_message_to_slack(
                     "type": "header",
                     "text": {
                         "type": "plain_text",
-                        "text": "Rivian Configurations Update" if status_code == 200 else "Rivian Configurations Error"
+                        "text": header_text
                     }
                 },
                 {
