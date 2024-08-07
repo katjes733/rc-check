@@ -22,6 +22,10 @@ from playhouse.postgres_ext import BinaryJSONField, DateTimeTZField, PostgresqlE
 
 CONST_ENCODING = 'utf-8'
 CONST_INCOMPLETE = "Incomplete"
+CONST_RED = "#FF0000"
+CONST_GREEN = "#00FF00"
+CONST_ORANGE = "#FF8C00"
+CONST_GRAY = "#808080"
 
 load_dotenv()
 
@@ -220,28 +224,38 @@ def prepare_and_post_message_to_slack(
     if not url:
         return
 
+    color = CONST_GRAY
+    if status_code == 200:
+        color = CONST_ORANGE
+    elif status_code == 201:
+        color = CONST_GREEN
+    elif status_code == 500:
+        color = CONST_RED
+
     message = {
-        "color": "00ff00" if status_code == 200 else "ff0000",
-        "text": message_text,
-        "blocks": [
-            {
-                "type": "header",
-                "text": {
-                    "type": "plain_text",
-                    "text": "Rivian Configurations Update" if status_code == 200 else "Rivian Configurations Error"
+        "attachments": [{
+            "fallback": re.sub(r"\<.*?\|(?P<desc>.*?)\>", r"\g<desc>", message_text),
+            "color": color,
+            "blocks": [
+                {
+                    "type": "header",
+                    "text": {
+                        "type": "plain_text",
+                        "text": "Rivian Configurations Update" if status_code == 200 else "Rivian Configurations Error"
+                    }
+                },
+                {
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": f"*{message_text}*"
+                    }
                 }
-            },
-            {
-                "type": "section",
-                "text": {
-                    "type": "mrkdwn",
-                    "text": f"*{message_text}*"
-                }
-            }
-        ]
+            ]
+        }]
     }
     for config in configurations:
-        message["blocks"].extend(get_config_message(config))
+        message["attachments"][0]["blocks"].extend(get_config_message(config))
 
     post_message(url, message)
 
@@ -397,7 +411,7 @@ def task(number: int):
 
     if articles is None:
         status_code = 500
-        message = "URL could not be rendered correctly after multiple reloads."
+        message = f"<{url}|URL> could not be rendered correctly after multiple reloads."
         logger.error(message)
         prepare_and_post_message_to_slack(
             status_code=status_code,
@@ -409,10 +423,10 @@ def task(number: int):
         status_code = 200
         configs_count = len(articles)
         if configs_count == 0:
-            message = f"No matching configuration was found for {url_description}"
+            message = f"No matching configuration was found for <{url}|{url_description}>"
             logger.info(message)
         else:
-            message = f"{configs_count} matching configuration{' was' if configs_count == 1 else 's were'} found for {url_description}"
+            message = f"{configs_count} matching configuration{' was' if configs_count == 1 else 's were'} found for <{url}|{url_description}>"
             logger.info(message)
 
         configurations = []
@@ -432,6 +446,7 @@ def task(number: int):
                 configurations=configurations,
             )
             new_record.save()
+            status_code = 201
             if len(articles) > 0 or noisy_messages:
                 prepare_and_post_message_to_slack(
                     status_code=status_code,
