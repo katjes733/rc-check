@@ -122,8 +122,7 @@ def get_config_data(config: str):
         config = config[position:]
         match = re.search(pattern, config)
 
-    if not config.endswith("More"):
-        configs.append(config)
+    configs.append(re.sub(r"(\d\+)More", r"\g<1> additional Packages", config))
 
     if len(configs) == 0:
         return None
@@ -358,8 +357,9 @@ def is_match_configurations(new: dict, current: dict) -> bool:
     if len(new) != len(current):
         return False
 
-    if f'"{CONST_INCOMPLETE}"' in json.dumps(new) or \
-            f'"{CONST_INCOMPLETE}"' in json.dumps(current):
+    if has_incomplete_configuration(new) and \
+            not has_incomplete_configuration(current):
+        # min compare
         for index, one_new in enumerate(new):
             if one_new["Vehicle"] != current[index]["Vehicle"] or \
                     one_new["Motor/Battery"] != current[index]["Motor/Battery"] or \
@@ -367,7 +367,21 @@ def is_match_configurations(new: dict, current: dict) -> bool:
                 return False
         return True
 
+    # full compare
     return new == current
+
+
+def has_incomplete_configuration(configurations: dict) -> bool:
+    """
+    Identifies if a set of configurations contain incomplete data.
+
+    Args:
+        configurations (dict): The dict of configurations.
+
+    Returns:
+        bool: True, if there is an incomplete configuration; false otherwise.
+    """
+    return f'"{CONST_INCOMPLETE}"' in json.dumps(configurations)
 
 
 def task(number: int):
@@ -379,7 +393,7 @@ def task(number: int):
     """
     url = urls_to_check[number]
     url_description = url_descriptions[number] if number < len(url_descriptions) else "No description"
-    articles = None
+    configurations = None
     with sync_playwright() as p:
         logger.info('Launching browser...')
         browser = p.webkit.launch()
@@ -392,27 +406,26 @@ def task(number: int):
         logger.info('Successfully retrieved URL.')
 
         reload_counter = 0
-        while articles is None and reload_counter < 3:
+        while configurations is None and reload_counter < 3:
             span_element = page.locator('text="No exact matches"')
             if span_element.count() > 0:
-                articles = []
+                configurations = []
 
             article_elements = page.locator("[data-testid^='ShopVehicleLink-']")
             config_count = len(article_elements.all())
             if config_count > 0:
-                articles = []
+                configurations = []
                 for element in article_elements.all():
-                    logger.debug(element.text_content())
-                    articles.append(element.text_content())
+                    configurations.append(get_config_data(element.text_content()))
 
-            if articles is None:
+            if configurations is None or has_incomplete_configuration(configurations):
                 reload_counter = reload_counter + 1
                 page.reload()
                 page.wait_for_load_state('load')
 
         browser.close()
 
-    if articles is None:
+    if configurations is None:
         status_code = 500
         message = f"<{url}|URL> could not be rendered correctly after multiple reloads."
         logger.error(message)
@@ -424,17 +437,13 @@ def task(number: int):
         )
     else:
         status_code = 200
-        configs_count = len(articles)
+        configs_count = len(configurations)
         if configs_count == 0:
             message = f"No matching configuration was found for <{url}|{url_description}>"
             logger.info(message)
         else:
             message = f"{configs_count} matching configuration{' was' if configs_count == 1 else 's were'} found for <{url}|{url_description}>"
             logger.info(message)
-
-        configurations = []
-        for article in articles:
-            configurations.append(get_config_data(article))
 
         record = RcCheckModel.select().where(RcCheckModel.url == url)
         if not record.exists():
@@ -450,7 +459,7 @@ def task(number: int):
             )
             new_record.save()
             status_code = 201
-            if len(articles) > 0 or noisy_messages:
+            if len(configurations) > 0 or noisy_messages:
                 prepare_and_post_message_to_slack(
                     status_code=status_code,
                     message_text=message,
