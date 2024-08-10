@@ -19,6 +19,10 @@ import psycopg2
 from peewee import Model, TextField, CompositeKey
 from playhouse.postgres_ext import BinaryJSONField, DateTimeTZField, PostgresqlExtDatabase
 
+from flask import Flask
+# from flask import jsonify, request
+from apscheduler.schedulers.background import BackgroundScheduler
+
 
 CONST_ENCODING = 'utf-8'
 CONST_INCOMPLETE = "Incomplete"
@@ -119,6 +123,10 @@ urls_to_check = []
 url_descriptions = []
 slack_hook_url = None  # pylint: disable=invalid-name
 noisy_messages = False  # pylint: disable=invalid-name
+
+app = Flask(__name__)
+
+app_scheduler = BackgroundScheduler()
 
 
 def get_config_data(config: str):
@@ -289,22 +297,21 @@ def prepare_and_post_message_to_slack(
 def handler(event):
     """
     Handles the check of the URL and evaluates if there are any configurations.
-
     Args:
         event (dict): to supply parameters directly.
 
     Returns:
         dict: Response Object
     """
-    global slack_hook_url, noisy_messages
+    global slack_hook_url, noisy_messages, urls_to_check, url_descriptions
     logger.debug('event: %s', event)
-    urls_to_check.extend(get_env_var_values('URL_TO_CHECK', event))
+    urls_to_check = get_env_var_values('URL_TO_CHECK', event)
 
     if len(urls_to_check) == 0:
         logger.warning("No URLs to check were specified. No processing done.")
         return None
 
-    url_descriptions.extend(get_env_var_values('URL_DESCRIPTION', event))
+    url_descriptions = get_env_var_values('URL_DESCRIPTION', event)
 
     logger.debug("urls_to_check: %s", urls_to_check)
     logger.debug("url_descriptions: %s", url_descriptions)
@@ -561,6 +568,7 @@ def task(number: int):
                     url=slack_hook_url
                 )
 
+
 def insert_previous_history_record(
         url: str,
         url_description: str,
@@ -602,4 +610,7 @@ def insert_previous_history_record(
 
 
 if __name__ == "__main__":
-    handler({})
+    app_scheduler.add_job(handler, 'interval', seconds=15, args=[{}])
+    app_scheduler.start()
+    app.run(port=5000)
+    app_scheduler.shutdown()
