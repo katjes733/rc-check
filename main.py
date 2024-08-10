@@ -16,7 +16,7 @@ from dotenv import load_dotenv
 from playwright.sync_api import sync_playwright
 
 import psycopg2
-from peewee import Model, TextField
+from peewee import Model, TextField, CompositeKey
 from playhouse.postgres_ext import BinaryJSONField, DateTimeTZField, PostgresqlExtDatabase
 
 
@@ -26,6 +26,8 @@ CONST_RED = "#FF0000"
 CONST_GREEN = "#00FF00"
 CONST_ORANGE = "#FF8C00"
 CONST_GRAY = "#808080"
+CONST_CREATE_ACTION = "create"
+CONST_UPDATE_ACTION = "update"
 
 load_dotenv()
 
@@ -86,9 +88,32 @@ class RcCheckModel(Model):
         table_name = 'rc_check'
 
 
+class RcCheckHistoryModel(Model):
+    """
+    Entity fo RC Check History.
+    Contains historic data of RC Check
+
+    Args:
+        Model (Model): The Model
+    """
+    url = TextField(null=False)
+    modified_time = DateTimeTZField(null=False, default=datetime.now)
+    modified_action = TextField(null=False)
+    url_description = TextField(null=True)
+    configurations = BinaryJSONField(default=[])
+
+    class Meta:
+        """
+        Meta data
+        """
+        database = db
+        table_name = 'rc_check_history'
+        primary_key = CompositeKey('url', 'modified_time')
+
+
 logger.debug(psycopg2)
 db.connect()
-db.create_tables([RcCheckModel])
+db.create_tables([RcCheckModel, RcCheckHistoryModel])
 
 urls_to_check = []
 url_descriptions = []
@@ -218,7 +243,6 @@ def prepare_and_post_message_to_slack(
         message_text (str): The message text.
         configurations (dict): The vehicle configurations.
         url (str): The URL.
-        url_description (str): The URL description.
     """
     if not url:
         return
@@ -458,6 +482,14 @@ def task(number: int):
                 configurations=configurations,
             )
             new_record.save()
+            new_history_record = RcCheckHistoryModel.create(
+                url=url,
+                modified_time=current_time,
+                modified_action=CONST_CREATE_ACTION,
+                url_description=url_description,
+                configurations=configurations,
+            )
+            new_history_record.save()
             status_code = 201
             if len(configurations) > 0 or noisy_messages:
                 prepare_and_post_message_to_slack(
@@ -482,6 +514,13 @@ def task(number: int):
 
                 existing_record.last_checked_time = current_time
                 existing_record.save()
+                insert_previous_history_record(
+                    url=url,
+                    url_description=url_description,
+                    configurations=configurations,
+                    current_time=current_time,
+                    existing_record=existing_record
+                )
 
                 if noisy_messages:
                     prepare_and_post_message_to_slack(
@@ -493,10 +532,27 @@ def task(number: int):
             else:
                 logger.info('There were changes to configurations; updating all.')
 
-                existing_record.modified = current_time
+                insert_previous_history_record(
+                    url=url,
+                    url_description=url_description,
+                    configurations=configurations,
+                    current_time=current_time,
+                    existing_record=existing_record
+                )
+
+                existing_record.modified_time = current_time
                 existing_record.last_checked_time = current_time
                 existing_record.configurations = configurations
                 existing_record.save()
+
+                new_history_record = RcCheckHistoryModel.create(
+                    url=url,
+                    modified_time=current_time,
+                    modified_action=CONST_UPDATE_ACTION,
+                    url_description=url_description,
+                    configurations=configurations,
+                )
+                new_history_record.save()
 
                 prepare_and_post_message_to_slack(
                     status_code=status_code,
@@ -504,6 +560,45 @@ def task(number: int):
                     configurations=configurations,
                     url=slack_hook_url
                 )
+
+def insert_previous_history_record(
+        url: str,
+        url_description: str,
+        configurations: dict,
+        current_time,
+        existing_record: dict):
+    """
+    In case there is no existing history, a new history is inserted based on
+    the existing record.
+    This method should be used for update cases only, as it required an
+    existing record as input.
+
+    Args:
+        url (str): The search URL.
+        url_description (str): The search URL description.
+        configurations (dict): The configurations.
+        current_time (_type_): The current time.
+        existing_record (dict): The existing record.
+    """
+    history_record = RcCheckHistoryModel.select().where(
+        (RcCheckHistoryModel.url == existing_record.url) &
+        (RcCheckHistoryModel.modified_time == existing_record.modified_time)
+    )
+    if not history_record.exists():
+        modified_time = current_time
+        modified_action = CONST_UPDATE_ACTION
+        if existing_record.modified_time == existing_record.created_time:
+            modified_time = existing_record.created_time
+            modified_action = CONST_CREATE_ACTION
+
+        new_history_record = RcCheckHistoryModel.create(
+            url=url,
+            modified_time=modified_time,
+            modified_action=modified_action,
+            url_description=url_description,
+            configurations=configurations,
+        )
+        new_history_record.save()
 
 
 if __name__ == "__main__":
