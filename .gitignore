@@ -5,3 +5,4 @@
 *.log
 
 .backup/
+__pycache__

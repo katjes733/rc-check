@@ -16,11 +16,14 @@ from dotenv import load_dotenv
 from playwright.sync_api import sync_playwright
 
 import psycopg2
-from peewee import Model, TextField, CompositeKey
-from playhouse.postgres_ext import BinaryJSONField, DateTimeTZField, PostgresqlExtDatabase
+from playhouse.postgres_ext import PostgresqlExtDatabase
+from playhouse.shortcuts import model_to_dict
 
-from flask import Flask
-# from flask import jsonify, request
+from models.check import RcCheckModel
+from models.check_history import RcCheckHistoryModel
+from models.check_url import RcCheckUrlsModel
+
+from flask import Flask, jsonify, request
 from apscheduler.schedulers.background import BackgroundScheduler
 
 
@@ -70,54 +73,10 @@ db = PostgresqlExtDatabase(
 )
 
 
-class RcCheckModel(Model):
-    """
-    Entity for RC Check.
-
-    Args:
-        Model (Model): The Model
-    """
-    url = TextField(primary_key=True, null=False)
-    url_description = TextField(null=True)
-    created_time = DateTimeTZField(default=datetime.now)
-    modified_time = DateTimeTZField(default=datetime.now)
-    last_checked_time = DateTimeTZField(default=datetime.now)
-    configurations = BinaryJSONField(default=[])
-
-    class Meta:
-        """
-        Meta data
-        """
-        database = db
-        table_name = 'rc_check'
-
-
-class RcCheckHistoryModel(Model):
-    """
-    Entity fo RC Check History.
-    Contains historic data of RC Check
-
-    Args:
-        Model (Model): The Model
-    """
-    url = TextField(null=False)
-    modified_time = DateTimeTZField(null=False, default=datetime.now)
-    modified_action = TextField(null=False)
-    url_description = TextField(null=True)
-    configurations = BinaryJSONField(default=[])
-
-    class Meta:
-        """
-        Meta data
-        """
-        database = db
-        table_name = 'rc_check_history'
-        primary_key = CompositeKey('url', 'modified_time')
-
-
 logger.debug(psycopg2)
 db.connect()
-db.create_tables([RcCheckModel, RcCheckHistoryModel])
+db.bind([RcCheckModel, RcCheckHistoryModel, RcCheckUrlsModel])
+db.create_tables([RcCheckModel, RcCheckHistoryModel, RcCheckUrlsModel])
 
 urls_to_check = []
 url_descriptions = []
@@ -226,9 +185,9 @@ def post_message(url, message):
         url (string): the destination url
         message (dictionary): the message
     """
-    request = Request(url, json.dumps(message).encode('utf-8'))
+    slack_request = Request(url, json.dumps(message).encode('utf-8'))
     try:
-        response = urlopen(request)
+        response = urlopen(slack_request)
         response.read()
         logger.info("Message posted")
     except HTTPError as err:
@@ -609,8 +568,77 @@ def insert_previous_history_record(
         new_history_record.save()
 
 
+@app.route('/api/urls', methods=['GET'])
+def get_urls():
+    query = RcCheckUrlsModel.select()
+    results = [model_to_dict(r) for r in query]
+    return jsonify(results)
+
+
+def get_url(url: str):
+    query = RcCheckUrlsModel.select().where(RcCheckUrlsModel.url == url)
+    return query.get_or_none()
+
+
+@app.route('/api/urls/<string:url>', methods=['DELETE'])
+def delete_url(url: str):
+    existing_url = get_url(url)
+    if not existing_url:
+        return jsonify({"error": f"URL [{url}] does not exist."}), 404
+
+    existing_url.delete_instance()
+    return jsonify(model_to_dict(existing_url)), 200
+
+
+@app.route('/api/urls', methods=['POST'])
+def create_url(data=None):
+    if data is None:
+        data = {}
+    url_data = {}
+    if data and RcCheckUrlsModel.url.name in data and RcCheckUrlsModel.url_description.name in data:
+        url_data[RcCheckUrlsModel.url.name] = data[RcCheckUrlsModel.url.name]
+        url_data[RcCheckUrlsModel.url_description.name] = data[RcCheckUrlsModel.url_description.name]
+    else:
+        tmp_data = request.get_json()
+        if tmp_data and RcCheckUrlsModel.url.name in tmp_data and RcCheckUrlsModel.url_description.name in tmp_data:
+            url_data[RcCheckUrlsModel.url.name] = tmp_data[RcCheckUrlsModel.url.name]
+            url_data[RcCheckUrlsModel.url_description.name] = tmp_data[RcCheckUrlsModel.url_description.name]
+    if not url_data:
+        return jsonify({"error": "Invalid URL properties."}), 400
+    existing_url = get_url(url_data[RcCheckUrlsModel.url.name])
+    if existing_url:
+        return jsonify({"error": f"URL [{url_data[RcCheckUrlsModel.url.name]}] already exists."}), 404
+    new_url = RcCheckUrlsModel.create(
+        url=url_data[RcCheckUrlsModel.url.name],
+        url_description=url_data[RcCheckUrlsModel.url_description.name],
+    )
+    new_url.save()
+    return jsonify(model_to_dict(new_url)), 200
+
+
+@app.route('/api/urls/<string:url>', methods=['PUT'])
+def update_url(url: str, data=None):
+    if data is None:
+        data = {}
+    url_data = {}
+    if data and RcCheckUrlsModel.url_description.name in data:
+        url_data[RcCheckUrlsModel.url_description.name] = data[RcCheckUrlsModel.url_description.name]
+    else:
+        tmp_data = request.get_json()
+        if tmp_data and RcCheckUrlsModel.url_description.name in tmp_data:
+            url_data[RcCheckUrlsModel.url_description.name] = tmp_data[RcCheckUrlsModel.url_description.name]
+    if not url_data:
+        return jsonify({"error": "Invalid URL properties."}), 400
+    updated_url = get_url(url)
+    if not updated_url:
+        return jsonify({"error": f"URL [{url}] does not exist."}), 404
+    updated_url.url_description = url_data[RcCheckUrlsModel.url_description.name]
+    updated_url.save()
+    return jsonify(model_to_dict(updated_url)), 200
+
+
 if __name__ == "__main__":
-    app_scheduler.add_job(handler, 'interval', seconds=15, args=[{}])
+    app_scheduler.add_job(handler, 'interval', minutes=5, args=[{}])
     app_scheduler.start()
-    app.run(port=5000)
+    app.run(port=5000, debug=os.getenv('DEBUG', 'false').lower() == 'true')
     app_scheduler.shutdown()
