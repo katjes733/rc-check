@@ -22,6 +22,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 
 from flask import Flask
 
+from api.history import create_history_in_db, get_history_for_url_and_modified_time_from_db, history_blueprint
 from models.check import RcCheckModel
 from models.check_history import RcCheckHistoryModel
 from models.check_url import RcCheckUrlsModel
@@ -87,6 +88,7 @@ noisy_messages = False  # pylint: disable=invalid-name
 app = Flask(__name__)
 
 app.register_blueprint(url_blueprint, url_prefix='/api')
+app.register_blueprint(history_blueprint, url_prefix='/api')
 
 app_scheduler = BackgroundScheduler()
 
@@ -472,14 +474,13 @@ def task(number: int):
                 configurations=configurations,
             )
             new_record.save()
-            new_history_record = RcCheckHistoryModel.create(
-                url=url,
-                modified_time=current_time,
-                modified_action=CONST_CREATE_ACTION,
-                url_description=url_description,
-                configurations=configurations,
-            )
-            new_history_record.save()
+            create_history_in_db({
+                RcCheckHistoryModel.url.name: url,
+                RcCheckHistoryModel.modified_time.name: current_time,
+                RcCheckHistoryModel.modified_action.name: CONST_CREATE_ACTION,
+                RcCheckHistoryModel.url_description.name: url_description,
+                RcCheckHistoryModel.configurations.name: configurations,
+            })
             status_code = 201
             if len(configurations) > 0 or noisy_messages:
                 prepare_and_post_message_to_slack(
@@ -535,14 +536,13 @@ def task(number: int):
                 existing_record.configurations = configurations
                 existing_record.save()
 
-                new_history_record = RcCheckHistoryModel.create(
-                    url=url,
-                    modified_time=current_time,
-                    modified_action=CONST_UPDATE_ACTION,
-                    url_description=url_description,
-                    configurations=configurations,
-                )
-                new_history_record.save()
+                create_history_in_db({
+                    RcCheckHistoryModel.url.name: url,
+                    RcCheckHistoryModel.modified_time.name: current_time,
+                    RcCheckHistoryModel.modified_action.name: CONST_UPDATE_ACTION,
+                    RcCheckHistoryModel.url_description.name: url_description,
+                    RcCheckHistoryModel.configurations.name: configurations,
+                })
 
                 prepare_and_post_message_to_slack(
                     status_code=status_code,
@@ -571,25 +571,24 @@ def insert_previous_history_record(
         current_time (_type_): The current time.
         existing_record (dict): The existing record.
     """
-    history_record = RcCheckHistoryModel.select().where(
-        (RcCheckHistoryModel.url == existing_record.url) &
-        (RcCheckHistoryModel.modified_time == existing_record.modified_time)
+    history_record = get_history_for_url_and_modified_time_from_db(
+        url=existing_record.url,
+        modified_time=existing_record.modified_time
     )
-    if not history_record.exists():
+    if not history_record:
         modified_time = current_time
         modified_action = CONST_UPDATE_ACTION
         if existing_record.modified_time == existing_record.created_time:
             modified_time = existing_record.created_time
             modified_action = CONST_CREATE_ACTION
 
-        new_history_record = RcCheckHistoryModel.create(
-            url=url,
-            modified_time=modified_time,
-            modified_action=modified_action,
-            url_description=url_description,
-            configurations=configurations,
-        )
-        new_history_record.save()
+        create_history_in_db({
+            RcCheckHistoryModel.url.name: url,
+            RcCheckHistoryModel.modified_time.name: modified_time,
+            RcCheckHistoryModel.modified_action.name: modified_action,
+            RcCheckHistoryModel.url_description.name: url_description,
+            RcCheckHistoryModel.configurations.name: configurations,
+        })
 
 
 if __name__ == "__main__":
