@@ -26,7 +26,7 @@ from models.check import RcCheckModel
 from models.check_history import RcCheckHistoryModel
 from models.check_url import RcCheckUrlsModel
 
-from api.url import url_blueprint
+from api.url import create_url_in_db, get_url, get_urls_from_db, url_blueprint
 
 
 CONST_ENCODING = 'utf-8'
@@ -81,7 +81,6 @@ db.bind([RcCheckModel, RcCheckHistoryModel, RcCheckUrlsModel])
 db.create_tables([RcCheckModel, RcCheckHistoryModel, RcCheckUrlsModel])
 
 urls_to_check = []
-url_descriptions = []
 slack_hook_url = None  # pylint: disable=invalid-name
 noisy_messages = False  # pylint: disable=invalid-name
 
@@ -257,6 +256,42 @@ def prepare_and_post_message_to_slack(
     post_message(url, message)
 
 
+def get_urls_to_check(event) -> list[dict]:
+    """
+    Gets the URL object to check.
+    Considers objects in the DB as well as objects provided
+    through environment variables or event object.
+    Objects in DB supersede any environment variables.
+
+    Args:
+        event (dict): The event object.
+
+    Returns:
+        list[dict]: The list of URL objects.
+    """
+    urls_from_env = get_env_var_values('URL_TO_CHECK', event)
+    logger.info(urls_from_env)
+    url_descriptions_from_env = get_env_var_values('URL_DESCRIPTION', event)
+    logger.info(url_descriptions_from_env)
+    url_objects = []
+    for index, url in enumerate(urls_from_env):
+        if not any(d.get("url") == url for d in url_objects):
+            url_description = "No description"
+            if index < len(url_descriptions_from_env):
+                url_description = url_descriptions_from_env[index]
+            url_objects.append({
+                "url": url,
+                "url_description": url_description,
+            })
+
+    for url_object in url_objects:
+        url_in_db = get_url(url_object["url"])
+        if not url_in_db:
+            create_url_in_db(url_object)
+
+    return get_urls_from_db()
+
+
 def handler(event):
     """
     Handles the check of the URL and evaluates if there are any configurations.
@@ -266,25 +301,10 @@ def handler(event):
     Returns:
         dict: Response Object
     """
-    global slack_hook_url, noisy_messages, urls_to_check, url_descriptions
+    global slack_hook_url, noisy_messages, urls_to_check
     logger.debug('event: %s', event)
-    urls_to_check = get_env_var_values('URL_TO_CHECK', event)
 
-    if len(urls_to_check) == 0:
-        logger.warning("No URLs to check were specified. No processing done.")
-        return None
-
-    url_descriptions = get_env_var_values('URL_DESCRIPTION', event)
-
-    logger.debug("urls_to_check: %s", urls_to_check)
-    logger.debug("url_descriptions: %s", url_descriptions)
-
-    if len(urls_to_check) > len(url_descriptions):
-        logger.warning(
-            "Number of URLs to check (%s) does not match the number of URL descriptions (%s).",
-            len(urls_to_check),
-            len(url_descriptions)
-        )
+    urls_to_check = get_urls_to_check(event)
 
     if 'SLACK_HOOK_URL' in event:
         slack_hook_url = event.SLACK_HOOK_URL
@@ -385,8 +405,8 @@ def task(number: int):
     Args:
         number (int): task ID
     """
-    url = urls_to_check[number]
-    url_description = url_descriptions[number] if number < len(url_descriptions) else "No description"
+    url = urls_to_check[number]["url"]
+    url_description = urls_to_check[number]["url_description"]
     configurations = None
     with sync_playwright() as p:
         logger.info('Launching browser...')
@@ -573,7 +593,7 @@ def insert_previous_history_record(
 
 
 if __name__ == "__main__":
-    app_scheduler.add_job(handler, 'interval', minutes=5, args=[{}])
+    app_scheduler.add_job(handler, 'interval', minutes=1, args=[{}])
     app_scheduler.start()
     app.run(port=5000, debug=os.getenv('DEBUG', 'false').lower() == 'true')
     app_scheduler.shutdown()
