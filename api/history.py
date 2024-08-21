@@ -1,11 +1,15 @@
 """
 History API for checks
+
+Provides Get and Create functionality only.
+Delete and Update is not supported to provide persistency.
 """
+from datetime import datetime
 from flask import Blueprint, jsonify, request, Response
 
 from playhouse.shortcuts import model_to_dict
 
-from datetime import datetime
+from peewee import IntegrityError
 
 from models.check_history import RcCheckHistoryModel
 
@@ -75,21 +79,73 @@ def get_history_for_url_and_modified_time() -> Response:
     Gets a single History by URL and modified time or None.
 
     Returns:
-        Response: Returns an array of dict for type RcCheckHistoryModel.
+        Response: Returns a dict for type RcCheckHistoryModel.
                   Returns error if not found or otherwise.
     """
     history_data = request.get_json()
-    if "url" not in history_data:
+    if RcCheckHistoryModel.url.name not in history_data:
         return jsonify({
-            "error": "Property 'url' not provided."
+            "error": f"Mandatory property [{RcCheckHistoryModel.url.name}] "
+            "not provided."
         }), 400
     modified_time = None
-    if "modified_time" in history_data:
-        modified_time = history_data["modified_time"]
-    result = get_history_for_url_and_modified_time_from_db(history_data["url"], modified_time)
+    if RcCheckHistoryModel.modified_time.name in history_data:
+        modified_time = history_data[RcCheckHistoryModel.modified_time.name]
+    result = get_history_for_url_and_modified_time_from_db(history_data[
+        RcCheckHistoryModel.url.name],
+        modified_time
+    )
     if not result:
         return jsonify(
-            {"error": f"History for [{history_data["url"]}] "
+            {"error": "History for "
+                f"[{history_data[RcCheckHistoryModel.url.name]}] "
                 "and modified time [{modified_time}] does not exist."}
         ), 404
     return jsonify(result), 200
+
+
+def create_history_in_db(data: dict) -> dict:
+    """
+    Creates a history record in the DB.
+
+    Args:
+        data (dict): The data dict.
+
+    Returns:
+        dict: The created history dict or a dict with the error.
+    """
+    try:
+        created_history = RcCheckHistoryModel.create(**data)
+        created_history.save()
+        return model_to_dict(created_history)
+    except IntegrityError as e:
+        return {"error": str(e)}
+
+
+@history_blueprint.route('/history', methods=['POST'])
+def create_history() -> Response:
+    """
+    Creates a new history record. Data is passed as request payload.
+
+    Returns:
+        Response: Creates an history record. Data is passed as request payload.
+    """
+    history_data = request.get_json()
+    created_history = create_history_in_db(history_data)
+    if "error" in created_history and \
+            "duplicate key" in created_history["error"]:
+        return jsonify({
+            "error": "History for URL "
+            f"[{history_data[RcCheckHistoryModel.url.name]}] "
+            "and modified time "
+            f"[{history_data[RcCheckHistoryModel.modified_time.name]}]"
+            "already exists.",
+            "details": created_history["error"],
+        }), 404
+    if "error" in created_history and \
+            "Failing row contains" in created_history["error"]:
+        return jsonify({
+            "error": "Invalid URL properties.",
+            "details": created_history["error"],
+        }), 400
+    return jsonify(created_history), 200

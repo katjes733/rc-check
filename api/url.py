@@ -1,5 +1,7 @@
 """
 URL API
+
+Provides Get, Create, Update and Delete functionality.
 """
 from flask import Blueprint, jsonify, request, Response
 
@@ -101,16 +103,12 @@ def create_url_in_db(data: dict) -> dict:
 
 
 @url_blueprint.route('/urls', methods=['POST'])
-def create_url():
+def create_url() -> Response:
     """
-    Creates an URL. Data can be passed in as function
-    parameter or as request payload.
-
-    Args:
-        data (dict, optional): The data. Defaults to None.
+    Creates an URL. Data is passed as request payload.
 
     Returns:
-        dict: The created URL object.
+        Response: The created URL object.
     """
     url_data = request.get_json()
     created_url = create_url_in_db(url_data)
@@ -154,8 +152,7 @@ def update_url_in_db(data: dict) -> dict:
 @url_blueprint.route('/urls/<string:url>', methods=['PUT'])
 def update_url(url: str):
     """
-    Update an URL. Data can be passed as function parameter
-    or as request payload.
+    Update an URL. Data is passed as request payload.
 
     Args:
         url (str): The URL.
