@@ -137,7 +137,7 @@ def update_url_in_db(data: dict) -> dict:
         data (dict): the URL data object
 
     Returns:
-        dict: Th updated URL data object.
+        dict: The updated URL data object.
     """
     if "url" not in data:
         return {"error": "Object contains no mandatory element 'url'."}
