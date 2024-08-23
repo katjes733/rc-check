@@ -29,6 +29,8 @@ from models.check_url import RcCheckUrlsModel
 
 from api.url import create_url_in_db, get_url, get_urls_from_db, url_blueprint
 
+from api.check import check_blueprint
+
 
 CONST_ENCODING = 'utf-8'
 CONST_INCOMPLETE = "Incomplete"
@@ -89,6 +91,7 @@ app = Flask(__name__)
 
 app.register_blueprint(url_blueprint, url_prefix='/api')
 app.register_blueprint(history_blueprint, url_prefix='/api')
+app.register_blueprint(check_blueprint, url_prefix='/api')
 
 app_scheduler = BackgroundScheduler()
 
