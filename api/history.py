@@ -32,7 +32,7 @@ def get_history_for_url_from_db(url: str) -> list[RcCheckHistoryModel]:
     return [model_to_dict(h) for h in query]
 
 
-@history_blueprint.route('/history/<string:url', methods=['GET'])
+@history_blueprint.route('/history/<string:url>', methods=['GET'])
 def get_history_for_url(url: str) -> Response:
     """
     Gets all history entries for a given URL.
