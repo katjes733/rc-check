@@ -16,8 +16,20 @@ from dotenv import load_dotenv
 from playwright.sync_api import sync_playwright
 
 import psycopg2
-from peewee import Model, TextField, CompositeKey
-from playhouse.postgres_ext import BinaryJSONField, DateTimeTZField, PostgresqlExtDatabase
+from playhouse.postgres_ext import PostgresqlExtDatabase
+
+from apscheduler.schedulers.background import BackgroundScheduler
+
+from flask import Flask
+
+from api.history import create_history_in_db, get_history_for_url_and_modified_time_from_db, history_blueprint
+from models.check import RcCheckModel
+from models.check_history import RcCheckHistoryModel
+from models.check_url import RcCheckUrlsModel
+
+from api.url import create_url_in_db, get_url, get_urls_from_db, url_blueprint
+
+from api.check import check_blueprint
 
 
 CONST_ENCODING = 'utf-8'
@@ -66,59 +78,22 @@ db = PostgresqlExtDatabase(
 )
 
 
-class RcCheckModel(Model):
-    """
-    Entity for RC Check.
-
-    Args:
-        Model (Model): The Model
-    """
-    url = TextField(primary_key=True, null=False)
-    url_description = TextField(null=True)
-    created_time = DateTimeTZField(default=datetime.now)
-    modified_time = DateTimeTZField(default=datetime.now)
-    last_checked_time = DateTimeTZField(default=datetime.now)
-    configurations = BinaryJSONField(default=[])
-
-    class Meta:
-        """
-        Meta data
-        """
-        database = db
-        table_name = 'rc_check'
-
-
-class RcCheckHistoryModel(Model):
-    """
-    Entity fo RC Check History.
-    Contains historic data of RC Check
-
-    Args:
-        Model (Model): The Model
-    """
-    url = TextField(null=False)
-    modified_time = DateTimeTZField(null=False, default=datetime.now)
-    modified_action = TextField(null=False)
-    url_description = TextField(null=True)
-    configurations = BinaryJSONField(default=[])
-
-    class Meta:
-        """
-        Meta data
-        """
-        database = db
-        table_name = 'rc_check_history'
-        primary_key = CompositeKey('url', 'modified_time')
-
-
 logger.debug(psycopg2)
 db.connect()
-db.create_tables([RcCheckModel, RcCheckHistoryModel])
+db.bind([RcCheckModel, RcCheckHistoryModel, RcCheckUrlsModel])
+db.create_tables([RcCheckModel, RcCheckHistoryModel, RcCheckUrlsModel])
 
 urls_to_check = []
-url_descriptions = []
 slack_hook_url = None  # pylint: disable=invalid-name
 noisy_messages = False  # pylint: disable=invalid-name
+
+app = Flask(__name__)
+
+app.register_blueprint(url_blueprint, url_prefix='/api')
+app.register_blueprint(history_blueprint, url_prefix='/api')
+app.register_blueprint(check_blueprint, url_prefix='/api')
+
+app_scheduler = BackgroundScheduler()
 
 
 def get_config_data(config: str):
@@ -218,9 +193,9 @@ def post_message(url, message):
         url (string): the destination url
         message (dictionary): the message
     """
-    request = Request(url, json.dumps(message).encode('utf-8'))
+    slack_request = Request(url, json.dumps(message).encode('utf-8'))
     try:
-        response = urlopen(request)
+        response = urlopen(slack_request)
         response.read()
         logger.info("Message posted")
     except HTTPError as err:
@@ -286,35 +261,55 @@ def prepare_and_post_message_to_slack(
     post_message(url, message)
 
 
+def get_urls_to_check(event) -> list[dict]:
+    """
+    Gets the URL object to check.
+    Considers objects in the DB as well as objects provided
+    through environment variables or event object.
+    Objects in DB supersede any environment variables.
+
+    Args:
+        event (dict): The event object.
+
+    Returns:
+        list[dict]: The list of URL objects.
+    """
+    urls_from_env = get_env_var_values('URL_TO_CHECK', event)
+    logger.info(urls_from_env)
+    url_descriptions_from_env = get_env_var_values('URL_DESCRIPTION', event)
+    logger.info(url_descriptions_from_env)
+    url_objects = []
+    for index, url in enumerate(urls_from_env):
+        if not any(d.get("url") == url for d in url_objects):
+            url_description = "No description"
+            if index < len(url_descriptions_from_env):
+                url_description = url_descriptions_from_env[index]
+            url_objects.append({
+                "url": url,
+                "url_description": url_description,
+            })
+
+    for url_object in url_objects:
+        url_in_db = get_url(url_object["url"])
+        if not url_in_db:
+            create_url_in_db(url_object)
+
+    return get_urls_from_db()
+
+
 def handler(event):
     """
     Handles the check of the URL and evaluates if there are any configurations.
-
     Args:
         event (dict): to supply parameters directly.
 
     Returns:
         dict: Response Object
     """
-    global slack_hook_url, noisy_messages
+    global slack_hook_url, noisy_messages, urls_to_check
     logger.debug('event: %s', event)
-    urls_to_check.extend(get_env_var_values('URL_TO_CHECK', event))
 
-    if len(urls_to_check) == 0:
-        logger.warning("No URLs to check were specified. No processing done.")
-        return None
-
-    url_descriptions.extend(get_env_var_values('URL_DESCRIPTION', event))
-
-    logger.debug("urls_to_check: %s", urls_to_check)
-    logger.debug("url_descriptions: %s", url_descriptions)
-
-    if len(urls_to_check) > len(url_descriptions):
-        logger.warning(
-            "Number of URLs to check (%s) does not match the number of URL descriptions (%s).",
-            len(urls_to_check),
-            len(url_descriptions)
-        )
+    urls_to_check = get_urls_to_check(event)
 
     if 'SLACK_HOOK_URL' in event:
         slack_hook_url = event.SLACK_HOOK_URL
@@ -415,8 +410,8 @@ def task(number: int):
     Args:
         number (int): task ID
     """
-    url = urls_to_check[number]
-    url_description = url_descriptions[number] if number < len(url_descriptions) else "No description"
+    url = urls_to_check[number]["url"]
+    url_description = urls_to_check[number]["url_description"]
     configurations = None
     with sync_playwright() as p:
         logger.info('Launching browser...')
@@ -482,14 +477,13 @@ def task(number: int):
                 configurations=configurations,
             )
             new_record.save()
-            new_history_record = RcCheckHistoryModel.create(
-                url=url,
-                modified_time=current_time,
-                modified_action=CONST_CREATE_ACTION,
-                url_description=url_description,
-                configurations=configurations,
-            )
-            new_history_record.save()
+            create_history_in_db({
+                RcCheckHistoryModel.url.name: url,
+                RcCheckHistoryModel.modified_time.name: current_time,
+                RcCheckHistoryModel.modified_action.name: CONST_CREATE_ACTION,
+                RcCheckHistoryModel.url_description.name: url_description,
+                RcCheckHistoryModel.configurations.name: configurations,
+            })
             status_code = 201
             if len(configurations) > 0 or noisy_messages:
                 prepare_and_post_message_to_slack(
@@ -545,14 +539,13 @@ def task(number: int):
                 existing_record.configurations = configurations
                 existing_record.save()
 
-                new_history_record = RcCheckHistoryModel.create(
-                    url=url,
-                    modified_time=current_time,
-                    modified_action=CONST_UPDATE_ACTION,
-                    url_description=url_description,
-                    configurations=configurations,
-                )
-                new_history_record.save()
+                create_history_in_db({
+                    RcCheckHistoryModel.url.name: url,
+                    RcCheckHistoryModel.modified_time.name: current_time,
+                    RcCheckHistoryModel.modified_action.name: CONST_UPDATE_ACTION,
+                    RcCheckHistoryModel.url_description.name: url_description,
+                    RcCheckHistoryModel.configurations.name: configurations,
+                })
 
                 prepare_and_post_message_to_slack(
                     status_code=status_code,
@@ -560,6 +553,7 @@ def task(number: int):
                     configurations=configurations,
                     url=slack_hook_url
                 )
+
 
 def insert_previous_history_record(
         url: str,
@@ -580,26 +574,28 @@ def insert_previous_history_record(
         current_time (_type_): The current time.
         existing_record (dict): The existing record.
     """
-    history_record = RcCheckHistoryModel.select().where(
-        (RcCheckHistoryModel.url == existing_record.url) &
-        (RcCheckHistoryModel.modified_time == existing_record.modified_time)
+    history_record = get_history_for_url_and_modified_time_from_db(
+        url=existing_record.url,
+        modified_time=existing_record.modified_time
     )
-    if not history_record.exists():
+    if not history_record:
         modified_time = current_time
         modified_action = CONST_UPDATE_ACTION
         if existing_record.modified_time == existing_record.created_time:
             modified_time = existing_record.created_time
             modified_action = CONST_CREATE_ACTION
 
-        new_history_record = RcCheckHistoryModel.create(
-            url=url,
-            modified_time=modified_time,
-            modified_action=modified_action,
-            url_description=url_description,
-            configurations=configurations,
-        )
-        new_history_record.save()
+        create_history_in_db({
+            RcCheckHistoryModel.url.name: url,
+            RcCheckHistoryModel.modified_time.name: modified_time,
+            RcCheckHistoryModel.modified_action.name: modified_action,
+            RcCheckHistoryModel.url_description.name: url_description,
+            RcCheckHistoryModel.configurations.name: configurations,
+        })
 
 
 if __name__ == "__main__":
-    handler({})
+    app_scheduler.add_job(handler, 'interval', minutes=1, args=[{}])
+    app_scheduler.start()
+    app.run(port=5000, debug=os.getenv('DEBUG', 'false').lower() == 'true')
+    app_scheduler.shutdown()
